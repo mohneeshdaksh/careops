@@ -18,6 +18,13 @@ class CycleWorkflow:
     def add_lab_result(self, lab: LabResult) -> None:
         self.labs.append(lab)
 
+    @workflow.query
+    def get_status(self) -> dict:
+        return {
+            "stage": self.stage,
+            "labs": self.labs
+        }
+
     @workflow.run
     async def run(self, patient_id: str) -> str:
         for stage in STAGES:
@@ -26,4 +33,5 @@ class CycleWorkflow:
                 await workflow.wait_condition(lambda: len(self.labs) > 0)
             else:
                 await workflow.sleep(timedelta(seconds=10))
+        self.stage = "completed"
         return f"Cycle complete for {patient_id}"

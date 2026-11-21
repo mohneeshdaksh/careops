@@ -40,8 +40,8 @@ async def start_cycle(body: StartCycleRequest, request: Request):
         )
     except WorkflowAlreadyStartedError:
         raise HTTPException(
-            status_code=409, 
-            detail=f"Cycle already started for patient {body.patient_id}")
+            status_code = 409, 
+            detail = f"Cycle already started for patient {body.patient_id}")
     return {"workflow_id": handle.id, "status": "started"}
 
 
@@ -54,8 +54,24 @@ async def receive_lab_result(patient_id: str, lab: LabResult, request: Request):
     except RPCError as e:
         if e.status == RPCStatusCode.NOT_FOUND:
             raise HTTPException(
-                status_code=404,
-                detail=f"No active cycle found for patient {patient_id}"
+                status_code = 404,
+                detail = f"No active cycle found for patient {patient_id}"
             )
         raise
     return {"workflow_id": f"cycle-{patient_id}", "status": "lab result received"}
+
+
+@app.get("/cycles/{patient_id}")
+async def get_cycle_status(patient_id: str, request: Request):
+    client = request.app.state.temporal
+    handle = client.get_workflow_handle(f"cycle-{patient_id}")
+    try:
+        status = await handle.query(CycleWorkflow.get_status)
+    except RPCError as e:
+        if e.status == RPCStatusCode.NOT_FOUND:
+            raise HTTPException(
+                status_code = 404,
+                detail = f"No active cycle found for patient {patient_id}"
+            )
+        raise
+    return {"workflow_id" : f"cycle-{patient_id}", "status": status}
