@@ -4,8 +4,10 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from temporalio.client import Client
 from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.service import RPCError, RPCStatusCode
 
 from pathways.ivf.workflows import CycleWorkflow
+from pathways.ivf.models import LabResult
 
 
 class StartCycleRequest(BaseModel):
@@ -25,6 +27,7 @@ app = FastAPI(title="CareOps", lifespan=lifespan)
 async def health():
     return {"status": "ok"}
 
+
 @app.post("/cycles", status_code=202)
 async def start_cycle(body: StartCycleRequest, request: Request):
     client = request.app.state.temporal
@@ -40,3 +43,19 @@ async def start_cycle(body: StartCycleRequest, request: Request):
             status_code=409, 
             detail=f"Cycle already started for patient {body.patient_id}")
     return {"workflow_id": handle.id, "status": "started"}
+
+
+@app.post("/cycles/{patient_id}/labs", status_code=202)
+async def receive_lab_result(patient_id: str, lab: LabResult, request: Request):
+    client = request.app.state.temporal
+    handle = client.get_workflow_handle(f"cycle-{patient_id}")
+    try:
+        await handle.signal(CycleWorkflow.add_lab_result, lab)
+    except RPCError as e:
+        if e.status == RPCStatusCode.NOT_FOUND:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active cycle found for patient {patient_id}"
+            )
+        raise
+    return {"workflow_id": f"cycle-{patient_id}", "status": "lab result received"}
