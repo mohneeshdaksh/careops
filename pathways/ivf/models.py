@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Literal
 
+from pydantic import BaseModel
+
 
 @dataclass
 class LabResult:
@@ -14,3 +16,8 @@ class DoctorReview:
     decision: Literal["approve", "reject"]
     reviewer: str
     note: str = ""
+
+
+class LabSummary(BaseModel):
+    summary: str
+    key_points: list[str]

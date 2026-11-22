@@ -2,10 +2,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowUpdateFailedError
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
-from temporalio.client import WorkflowUpdateFailedError
+from temporalio.contrib.pydantic import pydantic_data_converter
 
 from pathways.ivf.workflows import CycleWorkflow
 from pathways.ivf.models import LabResult, DoctorReview
@@ -17,7 +17,7 @@ class StartCycleRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.temporal = await Client.connect("localhost:7233")
+    app.state.temporal = await Client.connect("localhost:7233", data_converter=pydantic_data_converter)
     yield
 
 
