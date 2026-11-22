@@ -7,6 +7,7 @@ from temporalio.exceptions import ActivityError
 with workflow.unsafe.imports_passed_through():
     from pathways.ivf.activities import summarize_labs
     from pathways.ivf.models import LabResult, DoctorReview, LabSummary
+    from pathways.ivf.red_flags import check_red_flags
 
 
 STAGES = ["baseline", "stimulation", "monitoring", "trigger", "retrieval"]
@@ -20,6 +21,7 @@ class CycleWorkflow:
         self.review: DoctorReview | None = None
         self.summary: LabSummary | None = None
         self.summary_failed = False
+        self.red_flags: list[str] = []
 
     @workflow.signal
     def add_lab_result(self, lab: LabResult) -> None:
@@ -34,6 +36,8 @@ class CycleWorkflow:
     def validate_review(self, review: DoctorReview) -> None:
         if self.stage != "awaiting_approval":
             raise ValueError(f"Cannot accept a review: cycle is in '{self.stage}', not awaiting approval")
+        if self.red_flags and review.decision == "approve" and not review.note.strip():
+            raise ValueError(f"Approval requires a note because of red flags: {self.red_flags}")
 
     @workflow.query
     def get_status(self) -> dict:
@@ -43,6 +47,7 @@ class CycleWorkflow:
             "review": self.review,
             "summary": self.summary,
             "summary_failed": self.summary_failed,
+            "red_flags": self.red_flags,
         }
 
     @workflow.run
@@ -51,6 +56,7 @@ class CycleWorkflow:
             self.stage = stage
             if stage == "monitoring":
                 await workflow.wait_condition(lambda: len(self.labs) > 0)
+                self.red_flags = check_red_flags(self.labs)
                 try:
                     self.summary = await workflow.execute_activity(
                         summarize_labs,
