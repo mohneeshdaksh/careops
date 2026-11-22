@@ -12,6 +12,7 @@ CareOps automates the busywork and keeps the clinical decision with a human:
 
 - **The workflow engine** (Temporal) owns state, timers and retries. It's plain deterministic code.
 - **The LLM** (Claude) does only language work: it summarizes lab results.
+- **Tracing** (Langfuse) records every LLM call so its input, output, latency and cost can be inspected.
 - **Deterministic rules** flag risky values, whatever the LLM says.
 - **The doctor** approves or rejects. Nothing clinical happens without them.
 
@@ -26,9 +27,11 @@ CareOps automates the busywork and keeps the clinical decision with a human:
                   ┌──────▼───────┐   activity    ┌─────────────────────┐
                   │   Temporal   │ ────────────► │ Claude lab summary  │
                   │CycleWorkflow │               │ (Pydantic-validated)│
-                  └──────────────┘               └─────────────────────┘
-                     │
-                     └─ red-flag rules run inside the workflow (pure Python)
+                  └──────────────┘               └──────────┬──────────┘
+                     │                                      │ traces
+                     └─ red-flag rules run inside      ┌────▼─────┐
+                        the workflow (pure Python)     │ Langfuse │
+                                                       └──────────┘
 ```
 
 **IVF cycle stages:** `baseline → stimulation → monitoring → trigger → retrieval`
@@ -57,6 +60,7 @@ You can read the current state at any time (`GET /cycles/{id}`) through a Tempor
 - [x] Deterministic red-flag rules with unit tests. A value in an unexpected unit is flagged as "could not check", not passed silently.
 - [x] Doctor review (HITL) as a Temporal Update with validation. Early or invalid reviews are rejected with `409`.
 - [x] Approving a flagged cycle requires a written note.
+- [x] Langfuse tracing on the summary step: prompt, structured output, latency, tokens and cost per call.
 - [x] Crash recovery: kill the worker mid-cycle, restart it, and the cycle resumes where it stopped.
 
 ## Safety principles
@@ -75,6 +79,7 @@ You can read the current state at any time (`GET /cycles/{id}`) through a Tempor
 | Workflow engine | Temporal (Python SDK) |
 | API | FastAPI |
 | LLM | Claude API (`anthropic` SDK), structured output via Pydantic |
+| Tracing | Langfuse |
 | Validation | Pydantic, dataclasses |
 | Tests | pytest |
 
@@ -95,7 +100,7 @@ The engine (workflow runner, approvals, AI steps) is meant to stay generic. Doma
 
 ## Run it locally
 
-**Requirements:** Python 3.11+, the [Temporal CLI](https://docs.temporal.io/cli), and an Anthropic API key.
+**Requirements:** Python 3.11+, the [Temporal CLI](https://docs.temporal.io/cli), an Anthropic API key, and (optional) a [Langfuse](https://langfuse.com) project for tracing.
 
 ```bash
 # 1. Install
@@ -103,8 +108,13 @@ python -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 
-# 2. Add your API key
-echo "ANTHROPIC_API_KEY=your-key-here" > .env
+# 2. Add your keys to a .env file (never committed)
+cat > .env <<'ENV'
+ANTHROPIC_API_KEY=your-key-here
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://us.cloud.langfuse.com
+ENV
 
 # 3. Start Temporal (terminal 1). Web UI: http://localhost:8233
 temporal server start-dev
@@ -161,7 +171,6 @@ python -m pytest
 ## Roadmap
 
 - PostgreSQL audit log for every event and decision
-- Langfuse tracing on LLM calls (input, output, cost, latency)
 - "Edit" option in doctor review
 - Synthetic patients via Synthea and FHIR resources (HAPI FHIR sandbox as mock EHR)
 - LangGraph agent for lab triage inside one activity
