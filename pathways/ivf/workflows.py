@@ -2,6 +2,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from pathways.ivf.activities import summarize_labs
@@ -18,6 +19,7 @@ class CycleWorkflow:
         self.labs: list[LabResult] = []
         self.review: DoctorReview | None = None
         self.summary: LabSummary | None = None
+        self.summary_failed = False
 
     @workflow.signal
     def add_lab_result(self, lab: LabResult) -> None:
@@ -40,6 +42,7 @@ class CycleWorkflow:
             "labs": self.labs,
             "review": self.review,
             "summary": self.summary,
+            "summary_failed": self.summary_failed,
         }
 
     @workflow.run
@@ -48,19 +51,23 @@ class CycleWorkflow:
             self.stage = stage
             if stage == "monitoring":
                 await workflow.wait_condition(lambda: len(self.labs) > 0)
-                self.summary = await workflow.execute_activity(
-                    summarize_labs,
-                    self.labs,
-                    start_to_close_timeout=timedelta(seconds=60),
-                    retry_policy=RetryPolicy(
-                        maximum_attempts=3,
-                        non_retryable_error_types=[
-                            "AuthenticationError",
-                            "PermissionDeniedError",
-                            "BadRequestError",
-                        ],
-                    ),
-                )
+                try:
+                    self.summary = await workflow.execute_activity(
+                        summarize_labs,
+                        self.labs,
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=RetryPolicy(
+                            maximum_attempts=3,
+                            non_retryable_error_types=[
+                                "AuthenticationError",
+                                "PermissionDeniedError",
+                                "BadRequestError",
+                            ],
+                        ),
+                    )
+                except ActivityError:
+                    self.summary = None
+                    self.summary_failed = True
                 self.stage = "awaiting_approval"
                 await workflow.wait_condition(lambda: self.review is not None)
                 if self.review.decision == "reject":
