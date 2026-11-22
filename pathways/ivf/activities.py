@@ -1,5 +1,6 @@
 from anthropic import AsyncAnthropic
 from temporalio import activity
+from langfuse import get_client
 
 from pathways.ivf.models import LabResult, LabSummary
 
@@ -16,15 +17,30 @@ SYSTEM_PROMPT = (
 @activity.defn
 async def summarize_labs(labs: list[LabResult]) -> LabSummary:
     lab_lines = "\n".join(f"- {lab.test_name}: {lab.value} {lab.unit}" for lab in labs)
+    user_message = f"Summarize these lab results:\n{lab_lines}"
 
-    client = AsyncAnthropic(max_retries=0)
-    response = await client.messages.parse(
-        model=MODEL,
-        max_tokens=4000,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": f"Summarize these lab results:\n{lab_lines}"}],
-        output_format=LabSummary,
-    )
+    langfuse = get_client()
+    with langfuse.start_as_current_observation(
+        as_type="span",
+        name="summarize-labs",
+    ) as span:
+        span.update(
+            input={"system": SYSTEM_PROMPT, "user": user_message}
+        )
+
+        client = AsyncAnthropic(max_retries=0)
+        response = await client.messages.parse(
+            model=MODEL,
+            max_tokens=4000,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}],
+            output_format=LabSummary,
+        )
+
+        span.update(
+            output=response.parsed_output,
+            metadata={"stop_reason": response.stop_reason},
+        )
 
     if response.parsed_output is None:
         raise ValueError(f"No valid summary returned (stop_reason: {response.stop_reason})")
