@@ -10,6 +10,7 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 
 from pathways.ivf.workflows import CycleWorkflow
 from pathways.ivf.activities import summarize_labs
+from engine.audit import record_audit_event
 
 
 async def main():
@@ -18,7 +19,7 @@ async def main():
         client,
         task_queue="careops",
         workflows=[CycleWorkflow],
-        activities=[summarize_labs],
+        activities=[summarize_labs, record_audit_event],
     )
     print("Worker running. Press Ctrl+C to stop.")
     await worker.run()
