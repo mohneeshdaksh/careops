@@ -15,6 +15,7 @@ CareOps automates the busywork and keeps the clinical decision with a human:
 - **Tracing** (Langfuse) records every LLM call so its input, output, latency and cost can be inspected.
 - **Deterministic rules** flag risky values, whatever the LLM says.
 - **The doctor** approves or rejects. Nothing clinical happens without them.
+- **The audit log** (PostgreSQL) records every event and decision: who did what, to which cycle, and when.
 
 ## Architecture
 
@@ -27,11 +28,14 @@ CareOps automates the busywork and keeps the clinical decision with a human:
                   ┌──────▼───────┐   activity    ┌─────────────────────┐
                   │   Temporal   │ ────────────► │ Claude lab summary  │
                   │CycleWorkflow │               │ (Pydantic-validated)│
-                  └──────────────┘               └──────────┬──────────┘
-                     │                                      │ traces
-                     └─ red-flag rules run inside      ┌────▼─────┐
-                        the workflow (pure Python)     │ Langfuse │
-                                                       └──────────┘
+                  └──────┬───────┘               └──────────┬──────────┘
+                         │ activity                         │ traces
+                  ┌──────▼───────┐                     ┌────▼─────┐
+                  │  PostgreSQL  │                     │ Langfuse │
+                  │  audit log   │                     └──────────┘
+                  └──────────────┘
+
+  Red-flag rules run inside the workflow itself (pure, deterministic Python).
 ```
 
 **IVF cycle stages:** `baseline → stimulation → monitoring → trigger → retrieval`
@@ -47,6 +51,7 @@ CareOps automates the busywork and keeps the clinical decision with a human:
    - the cycle isn't awaiting approval yet, or
    - there are red flags and the approval has no note.
 7. If approved, the cycle continues to retrieval. If rejected, it's cancelled.
+8. Every step above is written to a PostgreSQL **audit log** by a Temporal activity. If the database is down, the workflow waits and retries, so nothing happens without a record.
 
 You can read the current state at any time (`GET /cycles/{id}`) through a Temporal **query**.
 
@@ -61,7 +66,21 @@ You can read the current state at any time (`GET /cycles/{id}`) through a Tempor
 - [x] Doctor review (HITL) as a Temporal Update with validation. Early or invalid reviews are rejected with `409`.
 - [x] Approving a flagged cycle requires a written note.
 - [x] Langfuse tracing on the summary step: prompt, structured output, latency, tokens and cost per call.
+- [x] PostgreSQL audit log: every stage, lab, red-flag check, AI summary, doctor decision (with reviewer and note) and outcome, written by a Temporal activity with parameterized SQL.
 - [x] Crash recovery: kill the worker mid-cycle, restart it, and the cycle resumes where it stopped.
+
+Example audit trail for one cycle (trimmed):
+
+```
+event_type        | actor       | details
+------------------+-------------+-------------------------------------------------
+cycle_started     | system      | {"patient_id": "patient-090"}
+labs_received     | lab-webhook | {"labs": [{"test_name": "estradiol", "value": 5000.0, ...}]}
+red_flags_checked | system      | {"flags": ["very high estradiol ... (limit 4000)"]}
+summary_created   | ai          | {"summary": "Estradiol level reported at 5000.0 pg/mL ...", ...}
+review_submitted  | dr-smith    | {"decision": "approve", "note": "Reviewed E2, rechecking tomorrow"}
+cycle_completed   | system      | {}
+```
 
 ## Safety principles
 
@@ -80,6 +99,7 @@ You can read the current state at any time (`GET /cycles/{id}`) through a Tempor
 | API | FastAPI |
 | LLM | Claude API (`anthropic` SDK), structured output via Pydantic |
 | Tracing | Langfuse |
+| Database | PostgreSQL 17 (Docker), `psycopg` 3 (async), JSONB |
 | Validation | Pydantic, dataclasses |
 | Tests | pytest |
 
@@ -92,15 +112,18 @@ pathways/ivf/workflows.py   CycleWorkflow: stages, timers, signal, query, update
 pathways/ivf/activities.py  Claude lab-summary activity
 pathways/ivf/red_flags.py   Deterministic red-flag rules
 pathways/ivf/models.py      LabResult, DoctorReview, LabSummary
+engine/audit.py             Audit-log activity (generic, shared by all pathways)
+db/schema.sql               audit_events table and index
+docker-compose.yml          PostgreSQL container
 tests/                      Unit tests
 playground/                 Learning code, not part of the app
 ```
 
-The engine (workflow runner, approvals, AI steps) is meant to stay generic. Domain details (stages, lab types, thresholds) live in `pathways/ivf/`, so another care pathway can be added alongside it.
+The engine (workflow runner, approvals, AI steps, audit log) is meant to stay generic. Domain details (stages, lab types, thresholds) live in `pathways/ivf/`, so another care pathway can be added alongside it.
 
 ## Run it locally
 
-**Requirements:** Python 3.11+, the [Temporal CLI](https://docs.temporal.io/cli), an Anthropic API key, and (optional) a [Langfuse](https://langfuse.com) project for tracing.
+**Requirements:** Python 3.11+, Docker, the [Temporal CLI](https://docs.temporal.io/cli), an Anthropic API key, and (optional) a [Langfuse](https://langfuse.com) project for tracing.
 
 ```bash
 # 1. Install
@@ -114,15 +137,23 @@ ANTHROPIC_API_KEY=your-key-here
 LANGFUSE_PUBLIC_KEY=pk-lf-...
 LANGFUSE_SECRET_KEY=sk-lf-...
 LANGFUSE_BASE_URL=https://us.cloud.langfuse.com
+POSTGRES_USER=careops
+POSTGRES_PASSWORD=choose-a-password
+POSTGRES_DB=careops
+DATABASE_URL=postgresql://careops:choose-a-password@localhost:5432/careops
 ENV
 
-# 3. Start Temporal (terminal 1). Web UI: http://localhost:8233
+# 3. Start PostgreSQL and create the audit table
+docker compose up -d
+docker compose exec -T postgres psql -U careops -d careops < db/schema.sql
+
+# 4. Start Temporal (terminal 1). Web UI: http://localhost:8233
 temporal server start-dev
 
-# 4. Start the worker (terminal 2)
+# 5. Start the worker (terminal 2)
 python worker.py
 
-# 5. Start the API (terminal 3). Docs: http://localhost:8000/docs
+# 6. Start the API (terminal 3). Docs: http://localhost:8000/docs
 python -m uvicorn api.main:app --reload
 ```
 
@@ -155,6 +186,14 @@ curl -X POST localhost:8000/cycles/patient-001/review \
 
 Stage timers are 10 seconds so a full cycle can be watched in the Temporal UI.
 
+See the cycle's audit trail:
+
+```bash
+docker compose exec postgres psql -U careops -d careops -c \
+  "SELECT occurred_at, event_type, actor, details FROM audit_events
+   WHERE workflow_id = 'cycle-patient-001' ORDER BY occurred_at;"
+```
+
 ### Run tests
 
 ```bash
@@ -166,11 +205,13 @@ python -m pytest
 - Red flags are checked once, when the first lab arrives. A lab that arrives during the AI summary isn't re-checked or summarized yet.
 - The Temporal dev server keeps history in memory. Restarting it loses all cycles.
 - No authentication or role-based access on the API yet.
-- No persistent audit log yet (see roadmap).
+- Blocked review attempts (e.g. approving a flagged cycle without a note) are rejected but not yet written to the audit log.
+- The audit log is append-only by convention; the database doesn't yet enforce it (e.g. by revoking `UPDATE`/`DELETE`).
+- Each audit write opens a new database connection. A connection pool would be needed at higher volume.
+- The schema is a plain SQL file. A migration tool (e.g. Alembic) would be needed as it grows.
 
 ## Roadmap
 
-- PostgreSQL audit log for every event and decision
 - "Edit" option in doctor review
 - Synthetic patients via Synthea and FHIR resources (HAPI FHIR sandbox as mock EHR)
 - LangGraph agent for lab triage inside one activity
